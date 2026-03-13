@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SSE vs Streamable HTTP Dashboard</title>
+  <style>
+    :root {
+      --bg: #eef3f8;
+      --card: #ffffff;
+      --text: #1f2937;
+      --muted: #475569;
+      --sse: #0f766e;
+      --stream: #1d4ed8;
+    }
+    body { font-family: "Segoe UI", sans-serif; margin: 20px; background: var(--bg); color: var(--text); }
+    h1 { margin-bottom: 10px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+    .card { background: var(--card); border: 1px solid #d9e2ef; border-radius: 12px; padding: 14px; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    button { border: 0; color: #fff; padding: 8px 12px; border-radius: 8px; cursor: pointer; }
+    button.sse { background: var(--sse); }
+    button.stream { background: var(--stream); }
+    progress { width: 100%; height: 20px; margin: 10px 0; }
+    pre { background: #0f172a; color: #e2e8f0; padding: 10px; border-radius: 8px; height: 190px; overflow: auto; font-size: 12px; }
+    .meta { color: var(--muted); font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>比較ダッシュボード</h1>
+  <p class="meta">同時に実行して、更新体験とログの差分を観測できます。</p>
+
+  <div class="grid">
+    <section class="card">
+      <h2>SSE</h2>
+      <div class="row">
+        <button class="sse" id="sseStart">開始</button>
+        <button class="sse" id="sseStop">停止</button>
+        <span id="sseStatus">未接続</span>
+      </div>
+      <progress id="sseBar" value="0" max="100"></progress>
+      <div id="ssePercent">0%</div>
+      <pre id="sseLog"></pre>
+    </section>
+
+    <section class="card">
+      <h2>Streamable HTTP</h2>
+      <div class="row">
+        <button class="stream" id="streamStart">開始</button>
+        <button class="stream" id="streamStop">停止</button>
+        <span id="streamStatus">未開始</span>
+      </div>
+      <progress id="streamBar" value="0" max="100"></progress>
+      <div id="streamPercent">0%</div>
+      <pre id="streamLog"></pre>
+    </section>
+  </div>
+
+  <script>
+    function appendLog(id, text) {
+      const el = document.getElementById(id);
+      el.textContent += `${new Date().toISOString()} ${text}\n`;
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function updateProgress(prefix, value) {
+      document.getElementById(`${prefix}Bar`).value = value;
+      document.getElementById(`${prefix}Percent`).textContent = `${value}%`;
+    }
+
+    let sseSource = null;
+    let sseLast = 0;
+
+    document.getElementById('sseStart').addEventListener('click', () => {
+      if (sseSource) sseSource.close();
+      sseLast = 0;
+      updateProgress('sse', 0);
+      document.getElementById('sseLog').textContent = '';
+      document.getElementById('sseStatus').textContent = '接続中';
+
+      sseSource = new EventSource('http://localhost:3000/progress-sse');
+      appendLog('sseLog', 'connect');
+
+      sseSource.addEventListener('progress', (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.percent < sseLast) return;
+        sseLast = msg.percent;
+        updateProgress('sse', msg.percent);
+        appendLog('sseLog', `progress ${msg.percent}%`);
+      });
+
+      sseSource.addEventListener('done', () => {
+        updateProgress('sse', 100);
+        document.getElementById('sseStatus').textContent = '完了';
+        appendLog('sseLog', 'done');
+        sseSource.close();
+        sseSource = null;
+      });
+
+      sseSource.onerror = () => {
+        document.getElementById('sseStatus').textContent = 'エラーまたは再接続';
+        appendLog('sseLog', 'error_or_reconnecting');
+      };
+    });
+
+    document.getElementById('sseStop').addEventListener('click', () => {
+      if (!sseSource) return;
+      sseSource.close();
+      sseSource = null;
+      document.getElementById('sseStatus').textContent = '停止';
+      appendLog('sseLog', 'stopped_by_user');
+    });
+
+    let streamAbort = null;
+    let streamLast = 0;
+
+    async function runStream() {
+      if (streamAbort) streamAbort.abort();
+      streamAbort = new AbortController();
+      streamLast = 0;
+      updateProgress('stream', 0);
+      document.getElementById('streamLog').textContent = '';
+      document.getElementById('streamStatus').textContent = '読み取り中';
+      appendLog('streamLog', 'start');
+
+      const res = await fetch('http://localhost:3001/progress-stream', {
+        signal: streamAbort.signal,
+      });
+      if (!res.ok || !res.body) throw new Error(`response_error ${res.status}`);
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const msg = JSON.parse(line);
+            if (msg.type === 'progress') {
+              if (msg.percent < streamLast) continue;
+              streamLast = msg.percent;
+              updateProgress('stream', msg.percent);
+              appendLog('streamLog', `progress ${msg.percent}%`);
+            }
+            if (msg.type === 'done') {
+              updateProgress('stream', 100);
+              document.getElementById('streamStatus').textContent = '完了';
+              appendLog('streamLog', 'done');
+              return;
+            }
+          } catch (error) {
+            appendLog('streamLog', `parse_error ${error.message}`);
+          }
+        }
+      }
+
+      document.getElementById('streamStatus').textContent = 'ストリーム終了';
+      appendLog('streamLog', 'stream_closed');
+    }
+
+    document.getElementById('streamStart').addEventListener('click', async () => {
+      try {
+        await runStream();
+      } catch (error) {
+        if (error.name === 'AbortError') {
+          document.getElementById('streamStatus').textContent = '停止';
+          appendLog('streamLog', 'aborted_by_user');
+          return;
+        }
+        document.getElementById('streamStatus').textContent = 'エラー';
+        appendLog('streamLog', `error ${error.message}`);
+      }
+    });
+
+    document.getElementById('streamStop').addEventListener('click', () => {
+      if (!streamAbort) return;
+      streamAbort.abort();
+      streamAbort = null;
+    });
+  </script>
+</body>
+</html>

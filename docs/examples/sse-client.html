@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SSE Progress Client</title>
+  <style>
+    body { font-family: "Segoe UI", sans-serif; margin: 24px; background: #f7f9fc; color: #1e2a3a; }
+    .card { max-width: 760px; background: #fff; border: 1px solid #dbe3ef; border-radius: 12px; padding: 16px; }
+    h1 { margin-top: 0; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    button { border: 0; background: #0f766e; color: white; padding: 8px 12px; border-radius: 8px; cursor: pointer; }
+    button.secondary { background: #475569; }
+    progress { width: 100%; height: 20px; margin: 12px 0; }
+    pre { background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 8px; height: 220px; overflow: auto; }
+    .meta { font-size: 14px; color: #334155; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>SSE 進捗クライアント</h1>
+    <p class="meta">接続先: <code>http://localhost:3000/progress-sse</code></p>
+    <div class="row">
+      <button id="connectBtn">接続開始</button>
+      <button id="closeBtn" class="secondary">接続終了</button>
+      <span id="status">状態: 未接続</span>
+    </div>
+    <progress id="bar" value="0" max="100"></progress>
+    <div id="percent">0%</div>
+    <pre id="log"></pre>
+  </div>
+
+  <script>
+    let source = null;
+    let lastPercent = 0;
+
+    const bar = document.getElementById('bar');
+    const percentLabel = document.getElementById('percent');
+    const log = document.getElementById('log');
+    const status = document.getElementById('status');
+
+    function appendLog(line) {
+      log.textContent += `${new Date().toISOString()} ${line}\n`;
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function setProgress(percent) {
+      if (percent < lastPercent) return;
+      lastPercent = percent;
+      bar.value = percent;
+      percentLabel.textContent = `${percent}%`;
+    }
+
+    document.getElementById('connectBtn').addEventListener('click', () => {
+      if (source) {
+        source.close();
+      }
+      log.textContent = '';
+      lastPercent = 0;
+      setProgress(0);
+
+      source = new EventSource('http://localhost:3000/progress-sse');
+      status.textContent = '状態: 接続中';
+      appendLog('connect');
+
+      source.addEventListener('progress', (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          setProgress(payload.percent);
+          appendLog(`progress ${payload.percent}% ${payload.message}`);
+        } catch (error) {
+          appendLog(`parse_error ${error.message}`);
+        }
+      });
+
+      source.addEventListener('done', (event) => {
+        appendLog(`done ${event.data}`);
+        status.textContent = '状態: 完了';
+        source.close();
+        source = null;
+      });
+
+      source.onerror = () => {
+        status.textContent = '状態: エラーまたは再接続中';
+        appendLog('error_or_reconnecting');
+      };
+    });
+
+    document.getElementById('closeBtn').addEventListener('click', () => {
+      if (!source) return;
+      source.close();
+      source = null;
+      status.textContent = '状態: 手動で切断';
+      appendLog('closed_by_user');
+    });
+  </script>
+</body>
+</html>
